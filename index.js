@@ -236,28 +236,6 @@ async function connect() {
     if (connection === 'open') {
       console.log('✅ Bot connected!');
       console.log(`📱 Me: ${sock.user?.id}`);
-
-      // Request pairing code AFTER connected (only if not registered)
-      if (USE_PAIRING_CODE && !state.creds.registered && !pairingCodeRequested) {
-        pairingCodeRequested = true;
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        const phoneNumber = await new Promise(resolve => rl.question('Masukkan nomor WA (contoh: 628xxxxxxxxxx): ', resolve));
-        rl.close();
-
-        if (phoneNumber.trim()) {
-          try {
-            const code = await sock.requestPairingCode(phoneNumber.trim());
-            console.log(`\n=== PAIRING CODE ===`);
-            console.log(`Kode: ${code}`);
-            console.log(`Masukkan kode ini di WhatsApp > Linked Devices > Link a Device`);
-            console.log(`(Kode berlaku ~20 detik)`);
-            console.log(`====================\n`);
-          } catch (err) {
-            console.error('❌ Gagal request pairing code:', err.message);
-            console.log('Fallback ke QR code...');
-          }
-        }
-      }
     }
 
     if (connection === 'close') {
@@ -278,6 +256,29 @@ async function connect() {
     printQRInTerminal: false,
     generateHighQualityLinkPreview: true
   });
+
+  // REQUEST PAIRING CODE IMMEDIATELY AFTER SOCKET CREATION
+  if (USE_PAIRING_CODE && !state.creds.registered && !pairingCodeRequested) {
+    pairingCodeRequested = true;
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const phoneNumber = await new Promise(resolve => rl.question('Masukkan nomor WA (contoh: 628xxxxxxxxxx): ', resolve));
+    rl.close();
+
+    if (phoneNumber.trim()) {
+      try {
+        console.log('⏳ Requesting pairing code...');
+        const code = await sock.requestPairingCode(phoneNumber.trim());
+        console.log(`\n=== PAIRING CODE ===`);
+        console.log(`Kode: ${code}`);
+        console.log(`Masukkan kode ini di WhatsApp > Linked Devices > Link a Device`);
+        console.log(`(Kode berlaku ~20 detik - CEPAT!)`);
+        console.log(`====================\n`);
+      } catch (err) {
+        console.error('❌ Gagal request pairing code:', err.message);
+        console.log('Fallback ke QR code...');
+      }
+    }
+  }
 
   sock.ev.on('connection.update', handleConnectionUpdate);
   sock.ev.on('creds.update', saveCreds);
