@@ -15,10 +15,12 @@ const QRCode = require('qrcode-terminal');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const readline = require('readline');
 
 // ===== CONFIG =====
 const PREFIX = '!';
-const OWNER_NUMBER = '6289628044141@s.whatsapp.net'; // Ganti nomor kamu
+const OWNER_NUMBER = '6289628044141@s.whatsapp.net';
+const USE_PAIRING_CODE = true; // true = pairing code, false = QR code
 const AUTO_REPLY = {
   'hai': 'Hai! 👋 Ada yang bisa dibantu?',
   'halo': 'Halo! 👋 Selamat datang!',
@@ -44,30 +46,22 @@ ID: ${msg.key.remoteJid}`;
   '!pagi': 'Semngat Pagi, Pagi , Pagi. Ayo Pagi ini kita awali dengan Doa dan Bersyukur agar apa yang kita kerjakan berkah untuk kita semua.',
   '!siang': 'Ayo mana nih Foto-Foto Cek limit dan Transaksinya Mari di Post ke Grub.',
   '!malam': 'Ayo waktu sudah tidak banyak conversikan sebanyak mungkin transaksi Hari ini.',
-  // Also support without prefix
   'pagi': 'Semngat Pagi, Pagi , Pagi. Ayo Pagi ini kita awali dengan Doa dan Bersyukur agar apa yang kita kerjakan berkah untuk kita semua.',
   'siang': 'Ayo mana nih Foto-Foto Cek limit dan Transaksinya Mari di Post ke Grub.',
   'malam': 'Ayo waktu sudah tidak banyak conversikan sebanyak mungkin transaksi Hari ini.'
 };
 
-const GROUP_SETTINGS = new Map(); // groupJid -> { welcome: true, antilink: true }
+const GROUP_SETTINGS = new Map();
 
 // ===== HELPERS =====
 const logger = pino({ level: 'silent' });
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-function isOwner(jid) {
-  return jid === OWNER_NUMBER;
-}
-
-function isGroup(jid) {
-  return jid.endsWith('@g.us');
-}
+function isOwner(jid) { return jid === OWNER_NUMBER; }
+function isGroup(jid) { return jid.endsWith('@g.us'); }
 
 function getGroupSettings(jid) {
-  if (!GROUP_SETTINGS.has(jid)) {
-    GROUP_SETTINGS.set(jid, { welcome: true, antilink: true });
-  }
+  if (!GROUP_SETTINGS.has(jid)) GROUP_SETTINGS.set(jid, { welcome: true, antilink: true });
   return GROUP_SETTINGS.get(jid);
 }
 
@@ -97,13 +91,11 @@ async function handleAutoReply(sock, msg) {
 
   const lowerText = text.toLowerCase().trim();
 
-  // Auto reply ONLY for images (with or without caption)
   if (isImage) {
     await reply(sock, msg, 'Mantap Semangat terus kejar Cuan nya jangan pantang menyerah');
     return true;
   }
 
-  // Exact match
   if (AUTO_REPLY[lowerText]) {
     const response = typeof AUTO_REPLY[lowerText] === 'function'
       ? AUTO_REPLY[lowerText](msg)
@@ -112,7 +104,6 @@ async function handleAutoReply(sock, msg) {
     return true;
   }
 
-  // Keyword contains
   for (const [keyword, response] of Object.entries(AUTO_REPLY)) {
     if (lowerText.includes(keyword) && keyword.length > 3) {
       const res = typeof response === 'function' ? response(msg) : response;
@@ -136,7 +127,6 @@ async function handleCommands(sock, msg) {
   const isGrp = isGroup(jid);
   const sender = msg.key.participant || msg.key.remoteJid;
 
-  // Group commands
   if (cmd === 'welcome') {
     if (!isGrp) return reply(sock, msg, '❌ Hanya untuk grup.');
     const settings = getGroupSettings(jid);
@@ -195,7 +185,6 @@ async function handleGroupEvents(sock, msg) {
 
   const settings = getGroupSettings(jid);
 
-  // Anti-link
   if (settings.antilink) {
     const text = msg.message?.conversation ||
                  msg.message?.extendedTextMessage?.text ||
@@ -220,13 +209,65 @@ async function handleGroupEvents(sock, msg) {
 
 // ===== MAIN =====
 async function connect() {
-  // Use Fly.io volume path if available, otherwise local
   const authPath = process.env.FLY_APP_NAME ? '/app/auth' : './auth';
   const { state, saveCreds } = await useMultiFileAuthState(authPath);
   const { version, isLatest } = await fetchLatestBaileysVersion();
   console.log(`Baileys v${version.join('.')} ${isLatest ? '(latest)' : ''}`);
 
-  const sock = makeWASocket({
+  // Register event handler FIRST (before socket creation) to catch all events
+  let sock;
+  let pairingCodeRequested = false;
+
+  const handleConnectionUpdate = async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    // COMPLETELY SUPPRESS QR when using pairing code
+    if (qr && USE_PAIRING_CODE) {
+      // Do nothing - ignore QR entirely
+      return;
+    }
+
+    if (qr && !USE_PAIRING_CODE) {
+      console.log('\n=== SCAN QR CODE ===');
+      QRCode.generate(qr, { small: true });
+      console.log('====================\n');
+    }
+
+    if (connection === 'open') {
+      console.log('✅ Bot connected!');
+      console.log(`📱 Me: ${sock.user?.id}`);
+
+      // Request pairing code AFTER connected (only if not registered)
+      if (USE_PAIRING_CODE && !state.creds.registered && !pairingCodeRequested) {
+        pairingCodeRequested = true;
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const phoneNumber = await new Promise(resolve => rl.question('Masukkan nomor WA (contoh: 628xxxxxxxxxx): ', resolve));
+        rl.close();
+
+        if (phoneNumber.trim()) {
+          try {
+            const code = await sock.requestPairingCode(phoneNumber.trim());
+            console.log(`\n=== PAIRING CODE ===`);
+            console.log(`Kode: ${code}`);
+            console.log(`Masukkan kode ini di WhatsApp > Linked Devices > Link a Device`);
+            console.log(`(Kode berlaku ~20 detik)`);
+            console.log(`====================\n`);
+          } catch (err) {
+            console.error('❌ Gagal request pairing code:', err.message);
+            console.log('Fallback ke QR code...');
+          }
+        }
+      }
+    }
+
+    if (connection === 'close') {
+      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log(`❌ Connection closed: ${lastDisconnect?.error?.message}, reconnect: ${shouldReconnect}`);
+      if (shouldReconnect) setTimeout(connect, 5000);
+    }
+  };
+
+  sock = makeWASocket({
     version,
     auth: {
       creds: state.creds,
@@ -238,27 +279,7 @@ async function connect() {
     generateHighQualityLinkPreview: true
   });
 
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      console.log('\n=== SCAN QR CODE ===');
-      QRCode.generate(qr, { small: true });
-      console.log('====================\n');
-    }
-
-    if (connection === 'open') {
-      console.log('✅ Bot connected!');
-      console.log(`📱 Me: ${sock.user?.id}`);
-    }
-
-    if (connection === 'close') {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log(`❌ Connection closed: ${lastDisconnect?.error?.message}, reconnect: ${shouldReconnect}`);
-      if (shouldReconnect) setTimeout(connect, 5000);
-    }
-  });
-
+  sock.ev.on('connection.update', handleConnectionUpdate);
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -268,23 +289,16 @@ async function connect() {
       if (!msg.message || msg.key.fromMe) continue;
 
       try {
-        // Handle group events (welcome, antilink)
         await handleGroupEvents(sock, msg);
-
-        // Handle commands first
         const handledCmd = await handleCommands(sock, msg);
         if (handledCmd) continue;
-
-        // Handle auto-reply
         await handleAutoReply(sock, msg);
-
       } catch (err) {
         console.error('Error handling message:', err);
       }
     }
   });
 
-  // Group update (welcome message)
   sock.ev.on('groups.update', async (updates) => {
     for (const update of updates) {
       const jid = update.id;
