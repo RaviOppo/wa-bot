@@ -14,6 +14,7 @@ const pino = require('pino');
 const QRCode = require('qrcode-terminal');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 
 // ===== CONFIG =====
 const PREFIX = '!';
@@ -219,7 +220,9 @@ async function handleGroupEvents(sock, msg) {
 
 // ===== MAIN =====
 async function connect() {
-  const { state, saveCreds } = await useMultiFileAuthState('./auth');
+  // Use Fly.io volume path if available, otherwise local
+  const authPath = process.env.FLY_APP_NAME ? '/app/auth' : './auth';
+  const { state, saveCreds } = await useMultiFileAuthState(authPath);
   const { version, isLatest } = await fetchLatestBaileysVersion();
   console.log(`Baileys v${version.join('.')} ${isLatest ? '(latest)' : ''}`);
 
@@ -303,10 +306,33 @@ async function connect() {
   return sock;
 }
 
+// Health check server untuk Fly.io
+const healthServer = http.createServer((req, res) => {
+  if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+
+const PORT = process.env.PORT || 8080;
+healthServer.listen(PORT, () => {
+  console.log(`🏥 Health check server running on port ${PORT}`);
+});
+
 connect().catch(console.error);
 
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n👋 Shutting down...');
+  healthServer.close();
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  console.log('\n👋 SIGTERM received, shutting down...');
+  healthServer.close();
   process.exit(0);
 });
